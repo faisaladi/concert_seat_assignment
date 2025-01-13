@@ -206,6 +206,90 @@ export default function SeatAssignmentApp() {
   
     return true;
   };
+
+  const findBestSeatsForGroup = (
+    availableSeats: Seat[],
+    numberOfTickets: number,
+    category: string
+  ): Seat[] => {
+    addLog(`Finding best ${numberOfTickets} seats in ${category}`, 'info');
+  
+    // First, find all possible consecutive seat groups
+    const consecutiveGroups: Seat[][] = [];
+    let currentGroup: Seat[] = [];
+  
+    for (let i = 0; i < availableSeats.length; i++) {
+      // If this is the start of a group or continues the current group
+      if (currentGroup.length === 0 || 
+          isNextSeat(currentGroup[currentGroup.length - 1], availableSeats[i])) {
+        currentGroup.push(availableSeats[i]);
+      } else {
+        // End of a group
+        if (currentGroup.length > 0) {
+          consecutiveGroups.push([...currentGroup]);
+        }
+        currentGroup = [availableSeats[i]];
+      }
+    }
+    // Don't forget the last group
+    if (currentGroup.length > 0) {
+      consecutiveGroups.push(currentGroup);
+    }
+  
+    addLog(`Found ${consecutiveGroups.length} groups of consecutive seats`, 'info');
+    consecutiveGroups.forEach((group, index) => {
+      addLog(`Group ${index + 1}: ${group.map(s => s.seatNumber).join(', ')}`, 'info');
+    });
+  
+    // Find the best group that can accommodate the entire party
+    const perfectGroup = consecutiveGroups.find(group => group.length >= numberOfTickets);
+    if (perfectGroup) {
+      addLog(`Found perfect consecutive group: ${perfectGroup.slice(0, numberOfTickets).map(s => s.seatNumber).join(', ')}`, 'success');
+      return perfectGroup.slice(0, numberOfTickets);
+    }
+  
+    // If we can't find a perfect group, find the largest available consecutive group
+    const largestGroup = consecutiveGroups.reduce((largest, current) => 
+      current.length > largest.length ? current : largest, [] as Seat[]);
+  
+    addLog(`Largest consecutive group has ${largestGroup.length} seats`, 'info');
+  
+    // If the largest consecutive group is big enough to fit most of the party (e.g., 80%)
+    const SPLIT_THRESHOLD = 0.8; // Configurable threshold
+    if (largestGroup.length >= numberOfTickets * SPLIT_THRESHOLD) {
+      addLog(`Using largest available consecutive group and splitting remaining tickets`, 'warning');
+      const remainingTickets = numberOfTickets - largestGroup.length;
+      const remainingSeats = availableSeats.filter(seat => 
+        !largestGroup.find(s => s.seatNumber === seat.seatNumber)
+      ).slice(0, remainingTickets);
+  
+      return [...largestGroup, ...remainingSeats];
+    }
+  
+    // If we have to split the group completely, try to find the smallest number of splits possible
+    addLog(`No suitable consecutive groups found, attempting to minimize splits`, 'warning');
+    return availableSeats.slice(0, numberOfTickets);
+  };
+  
+  // Helper function to determine if two seats are consecutive
+  const isNextSeat = (seat1: Seat, seat2: Seat): boolean => {
+    // Extract the numeric and letter parts of the seat numbers
+    const parse = (seatNumber: string) => {
+      const match = seatNumber.match(/([A-Z]+)(\d+)/);
+      if (!match) return { row: '', number: 0 };
+      return {
+        row: match[1],
+        number: parseInt(match[2], 10)
+      };
+    };
+  
+    const s1 = parse(seat1.seatNumber);
+    const s2 = parse(seat2.seatNumber);
+  
+    // Seats are consecutive if they're in the same row and numbers differ by 1
+    return s1.row === s2.row && Math.abs(s1.number - s2.number) === 1;
+  };
+  
   
 const assignSeats = async () => {
   if (!validateData()) {
@@ -267,71 +351,31 @@ const assignSeats = async () => {
         !assignments.find(a => a.seatNumber === seat.seatNumber && a.category.toUpperCase() === category)
       ) || [];
 
-      addLog(`Found ${availableSeats.length} available seats in category ${category}`, 'info');
-
       if (availableSeats.length < buyers.length) {
-        addLog(`Warning: Not enough seats in category ${category} for invoice ${invoice} (need ${buyers.length}, found ${availableSeats.length})`, 'warning');
+        addLog(`Warning: Not enough seats in category ${category} for invoice ${invoice}`, 'warning');
         unassignedBuyers += buyers.length;
-        continue; // Skip this invoice if not enough seats
+        continue;
       }
 
-      // Find consecutive seats for the group
-      let assignedSeats: Seat[] = [];
-      let currentIndex = 0;
-
-      while (currentIndex <= availableSeats.length - buyers.length && assignedSeats.length < buyers.length) {
-        const consecutive = [availableSeats[currentIndex]];
-        let nextIndex = currentIndex + 1;
-
-        while (
-          nextIndex < availableSeats.length &&
-          consecutive.length < buyers.length &&
-          availableSeats[nextIndex].seatNumber !== "---"
-        ) {
-          consecutive.push(availableSeats[nextIndex]);
-          nextIndex++;
-        }
-
-        if (consecutive.length >= buyers.length) {
-          assignedSeats = consecutive.slice(0, buyers.length);
-          break;
-        }
-
-        currentIndex++;
-      }
-
-      // Assign seats to buyers
-      if (assignedSeats.length === buyers.length) {
-        addLog(`Found consecutive seats for invoice ${invoice}`, 'success');
+      // Use the new seat finding logic
+      const bestSeats = findBestSeatsForGroup(availableSeats, buyers.length, category);
+      
+      if (bestSeats.length === buyers.length) {
+        // Assign the seats
         buyers.forEach((buyer, index) => {
           assignments.push({
             category: buyer.category,
             invoice: buyer.invoice,
             ticketCode: buyer.ticketCode,
-            seatNumber: assignedSeats[index].seatNumber
+            seatNumber: bestSeats[index].seatNumber
           });
         });
+
+        // Log the assignment
+        addLog(`Assigned seats for invoice ${invoice}: ${bestSeats.map(s => s.seatNumber).join(', ')}`, 'success');
       } else {
-        addLog(`Attempting individual seat assignment for invoice ${invoice}`, 'info');
-        // If we can't find consecutive seats, assign any available seats
-        let assignedCount = 0;
-        buyers.forEach(buyer => {
-          const seat = availableSeats[assignedCount];
-          if (seat) {
-            assignments.push({
-              category: buyer.category,
-              invoice: buyer.invoice,
-              ticketCode: buyer.ticketCode,
-              seatNumber: seat.seatNumber
-            });
-            assignedCount++;
-          } else {
-            unassignedBuyers++;
-          }
-        });
-        if (assignedCount > 0) {
-          addLog(`Assigned ${assignedCount} individual seats for invoice ${invoice}`, 'success');
-        }
+        addLog(`Failed to find enough seats for invoice ${invoice}`, 'error');
+        unassignedBuyers += buyers.length;
       }
     }
 
